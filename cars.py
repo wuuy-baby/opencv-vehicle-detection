@@ -1,103 +1,269 @@
 import cv2
 import numpy as np
 import math
+import time
 
 
 # ============================================================
-# 参数
+# 1. 参数配置
 # ============================================================
 
-VIDEO_PATH = r"C:\Users\wuuy2\Downloads\xzg_875610.mp4"
+VIDEO_PATH = "xzg_875610.mp4"
 
-# 车辆最小尺寸
-MIN_WIDTH = 50
-MIN_HEIGHT = 50
+# ------------------------------------------------------------
+# MOG2 参数
+# ------------------------------------------------------------
 
-# MOG2
 HISTORY = 500
+
 VAR_THRESHOLD = 60
 
-# 车辆跟踪最大距离
+
+# ------------------------------------------------------------
+# 轮廓尺寸过滤
+# ------------------------------------------------------------
+
+MIN_WIDTH = 50
+
+MIN_HEIGHT = 50
+
+
+# ------------------------------------------------------------
+# Centroid Tracker 参数
+# ------------------------------------------------------------
+
+# 当前检测中心点和历史车辆中心点允许的最大距离
 MAX_DISTANCE = 100
 
-# 车辆最多允许丢失多少帧
+# 一辆车最多允许连续丢失多少帧
 MAX_MISSING = 8
 
-# ============================================================
-# 计数线
-# ============================================================
 
-LINE_Y = 600
+# ------------------------------------------------------------
+# Counting Zone
+#
+# 为了和 YOLO 版本公平比较，
+# 使用完全相同的计数区域
+# ------------------------------------------------------------
 
-# 允许车辆中心点在计数线附近有一点抖动
-OFFSET = 15
+ZONE_TOP = 300
 
-# ============================================================
+ZONE_BOTTOM = 400
+
+
+# ------------------------------------------------------------
 # 播放速度
-# ============================================================
+# ------------------------------------------------------------
 
 WAIT_TIME = 30
 
 
+# ------------------------------------------------------------
+# Ground Truth
+#
+# 你人工数完真实车辆数量后填写
+#
+# 例如：
+#
+# GROUND_TRUTH_COUNT = 36
+#
+# 如果暂时不知道：
+# ------------------------------------------------------------
+
+GROUND_TRUTH_COUNT = None
+
+
+# ------------------------------------------------------------
+# 是否保存结果视频
+# ------------------------------------------------------------
+
+SAVE_OUTPUT_VIDEO = True
+
+OUTPUT_VIDEO_PATH = "mog2_centroid_result.mp4"
+
+
 # ============================================================
-# cars
+# 2. Tracker 数据
 #
 # 每一辆车保存：
 #
-# center       当前中心点
-# previous     上一帧中心点
-# bbox         矩形框
-# missing      连续丢失帧数
-# counted      是否已经计数
-# direction    移动方向
+# center
+# previous
+# bbox
+# missing
+# counted
+# direction
+# last_region
+# entry_region
 # ============================================================
 
 cars = {}
 
-next_id = 0
 
-car_count = 0
+# 下一个新车辆 ID
+next_id = 0
 
 
 # ============================================================
-# 中心点
+# 3. 统计
+# ============================================================
+
+vehicle_count = 0
+
+up_count = 0
+
+down_count = 0
+
+
+# ============================================================
+# 4. 性能统计
+# ============================================================
+
+total_frames = 0
+
+total_processing_time = 0.0
+
+
+# ============================================================
+# 5. 工具函数
 # ============================================================
 
 def get_center(x, y, w, h):
 
     cx = x + w // 2
+
     cy = y + h // 2
 
     return cx, cy
 
 
-# ============================================================
-# 两点距离
-# ============================================================
-
 def distance(p1, p2):
 
     return math.sqrt(
-        (p1[0] - p2[0]) ** 2 +
+
+        (p1[0] - p2[0]) ** 2
+
+        +
+
         (p1[1] - p2[1]) ** 2
+
     )
 
 
 # ============================================================
-# 打开视频
+# 6. 判断车辆位于哪个区域
+# ============================================================
+
+def get_region(cy):
+
+    if cy < ZONE_TOP:
+
+        return "ABOVE"
+
+    elif cy > ZONE_BOTTOM:
+
+        return "BELOW"
+
+    else:
+
+        return "ZONE"
+
+
+# ============================================================
+# 7. 打开视频
 # ============================================================
 
 cap = cv2.VideoCapture(VIDEO_PATH)
 
+
 if not cap.isOpened():
 
-    print("视频打开失败")
+    print("Error opening video stream or file")
 
     exit()
 
 
 # ============================================================
-# MOG2
+# 8. 获取原视频参数
+# ============================================================
+
+video_fps = cap.get(
+    cv2.CAP_PROP_FPS
+)
+
+frame_width = int(
+    cap.get(
+        cv2.CAP_PROP_FRAME_WIDTH
+    )
+)
+
+frame_height = int(
+    cap.get(
+        cv2.CAP_PROP_FRAME_HEIGHT
+    )
+)
+
+video_frame_count = int(
+    cap.get(
+        cv2.CAP_PROP_FRAME_COUNT
+    )
+)
+
+
+print("====================================")
+print("Input Video Information")
+print("====================================")
+
+print(
+    "Resolution:",
+    frame_width,
+    "x",
+    frame_height
+)
+
+print(
+    "Original FPS:",
+    video_fps
+)
+
+print(
+    "Total Frames:",
+    video_frame_count
+)
+
+print()
+
+
+# ============================================================
+# 9. 输出视频
+# ============================================================
+
+writer = None
+
+
+if SAVE_OUTPUT_VIDEO:
+
+    fourcc = cv2.VideoWriter_fourcc(
+        *"mp4v"
+    )
+
+    writer = cv2.VideoWriter(
+
+        OUTPUT_VIDEO_PATH,
+
+        fourcc,
+
+        video_fps,
+
+        (
+            frame_width,
+            frame_height
+        )
+    )
+
+
+# ============================================================
+# 10. 创建 MOG2
 # ============================================================
 
 bgsubmog = cv2.createBackgroundSubtractorMOG2(
@@ -111,7 +277,7 @@ bgsubmog = cv2.createBackgroundSubtractorMOG2(
 
 
 # ============================================================
-# 形态学 Kernel
+# 11. 形态学 Kernel
 # ============================================================
 
 kernel = cv2.getStructuringElement(
@@ -123,20 +289,36 @@ kernel = cv2.getStructuringElement(
 
 
 # ============================================================
-# 主循环
+# 12. 主循环
 # ============================================================
 
 while True:
 
+
+    # --------------------------------------------------------
+    # 12.1 读取视频帧
+    # --------------------------------------------------------
+
     ret, frame = cap.read()
+
 
     if not ret:
 
         break
 
 
+    total_frames += 1
+
+
+    # --------------------------------------------------------
+    # 开始记录这一帧完整处理时间
+    # --------------------------------------------------------
+
+    frame_start_time = time.perf_counter()
+
+
     # ========================================================
-    # 1. 高斯滤波
+    # 13. Gaussian Blur
     # ========================================================
 
     blur = cv2.GaussianBlur(
@@ -150,14 +332,18 @@ while True:
 
 
     # ========================================================
-    # 2. MOG2
+    # 14. MOG2 Background Subtraction
     # ========================================================
 
-    mask = bgsubmog.apply(blur)
+    mask = bgsubmog.apply(
+        blur
+    )
 
 
     # ========================================================
-    # 3. 去除阴影
+    # 15. Threshold
+    #
+    # 去除 MOG2 阴影区域
     # ========================================================
 
     _, mask = cv2.threshold(
@@ -173,7 +359,7 @@ while True:
 
 
     # ========================================================
-    # 4. 开运算
+    # 16. Opening
     # ========================================================
 
     mask = cv2.morphologyEx(
@@ -189,7 +375,7 @@ while True:
 
 
     # ========================================================
-    # 5. 闭运算
+    # 17. Closing
     # ========================================================
 
     mask = cv2.morphologyEx(
@@ -205,7 +391,7 @@ while True:
 
 
     # ========================================================
-    # 6. 膨胀
+    # 18. Dilation
     # ========================================================
 
     mask = cv2.dilate(
@@ -219,7 +405,7 @@ while True:
 
 
     # ========================================================
-    # 7. 找轮廓
+    # 19. Contour Detection
     # ========================================================
 
     contours, _ = cv2.findContours(
@@ -236,26 +422,46 @@ while True:
 
 
     # ========================================================
-    # 8. 筛选车辆
+    # 20. 轮廓转 Bounding Box
     # ========================================================
 
     for cnt in contours:
 
-        x, y, w, h = cv2.boundingRect(cnt)
+
+        x, y, w, h = cv2.boundingRect(
+            cnt
+        )
 
 
-        # 太小的目标不要
+        # ----------------------------------------------------
+        # 太小的前景目标不要
+        # ----------------------------------------------------
 
-        if w < MIN_WIDTH or h < MIN_HEIGHT:
+        if (
+            w < MIN_WIDTH
+
+            or
+
+            h < MIN_HEIGHT
+        ):
 
             continue
 
 
-        # 过滤特别细长的目标
+        # ----------------------------------------------------
+        # 过滤异常宽高比
+        # ----------------------------------------------------
 
         ratio = w / float(h)
 
-        if ratio > 5 or ratio < 0.2:
+
+        if (
+            ratio > 5
+
+            or
+
+            ratio < 0.2
+        ):
 
             continue
 
@@ -263,22 +469,33 @@ while True:
         cx, cy = get_center(
 
             x,
+
             y,
+
             w,
+
             h
         )
 
 
         detections.append({
 
-            "center": (cx, cy),
+            "center": (
+                cx,
+                cy
+            ),
 
-            "bbox": (x, y, w, h)
+            "bbox": (
+                x,
+                y,
+                w,
+                h
+            )
         })
 
 
     # ========================================================
-    # 9. 已有车辆先增加 missing
+    # 21. 所有历史 Track missing +1
     # ========================================================
 
     for car_id in cars:
@@ -290,19 +507,26 @@ while True:
 
 
     # ========================================================
-    # 10. 最近邻匹配
+    # 22. Centroid Nearest-Neighbor Tracking
     # ========================================================
 
     for detection in detections:
 
+
         center = detection["center"]
+
 
         best_id = None
 
         best_dist = MAX_DISTANCE
 
 
+        # ----------------------------------------------------
+        # 找离当前 Detection 最近的历史 Track
+        # ----------------------------------------------------
+
         for car_id, car in cars.items():
+
 
             if car_id in used_ids:
 
@@ -325,15 +549,14 @@ while True:
 
 
         # ====================================================
-        # 找到旧车辆
+        # 23. 匹配到旧 Track
         # ====================================================
 
         if best_id is not None:
 
+
             car = cars[best_id]
 
-
-            # 保存上一帧位置
 
             previous = car["center"]
 
@@ -342,161 +565,394 @@ while True:
             current_y = center[1]
 
 
-            # ==================================================
-            # 判断运动方向
-            # ==================================================
+            # ------------------------------------------------
+            # 方向判断
+            # ------------------------------------------------
 
-            dy = current_y - previous_y
+            dy = (
+                current_y
+                -
+                previous_y
+            )
 
 
             if dy > 2:
 
                 car["direction"] = "DOWN"
 
+
             elif dy < -2:
 
                 car["direction"] = "UP"
 
 
-            # ==================================================
-            # 核心计数逻辑
-            #
-            # 从计数线一侧移动到另一侧
-            #
-            # 上 -> 下
-            # 或
-            # 下 -> 上
-            # ==================================================
+            # =================================================
+            # 24. 当前所在 Counting Region
+            # =================================================
 
-            if not car["counted"]:
+            current_region = get_region(
+                current_y
+            )
 
-                # ------------------------------------------
-                # 上往下
-                # ------------------------------------------
-
-                crossed_down = (
-
-                    previous_y < LINE_Y - OFFSET
-
-                    and
-
-                    current_y >= LINE_Y + OFFSET
-                )
+            last_region = car[
+                "last_region"
+            ]
 
 
-                # ------------------------------------------
-                # 下往上
-                # ------------------------------------------
+            # =================================================
+            # 25. 第一次拥有区域状态
+            # =================================================
 
-                crossed_up = (
-
-                    previous_y > LINE_Y + OFFSET
-
-                    and
-
-                    current_y <= LINE_Y - OFFSET
-                )
+            if last_region is None:
 
 
-                # ------------------------------------------
-                # 由于视频可能一帧移动很快，
-                # 如果直接从线左边跳到右边，
-                # 也允许直接判断。
-                # ------------------------------------------
-
-                simple_down = (
-
-                    previous_y < LINE_Y
-
-                    and
-
-                    current_y >= LINE_Y
-                )
+                car[
+                    "last_region"
+                ] = current_region
 
 
-                simple_up = (
+                if current_region in (
+                    "ABOVE",
+                    "BELOW"
+                ):
 
-                    previous_y > LINE_Y
+                    car[
+                        "entry_region"
+                    ] = current_region
+
+
+            # =================================================
+            # 26. 已经有区域历史
+            # =================================================
+
+            else:
+
+
+                # --------------------------------------------
+                # ABOVE → ZONE
+                # --------------------------------------------
+
+                if (
+                    last_region == "ABOVE"
 
                     and
 
-                    current_y <= LINE_Y
-                )
+                    current_region == "ZONE"
+                ):
+
+                    car[
+                        "entry_region"
+                    ] = "ABOVE"
 
 
-                if crossed_down or crossed_up:
+                # --------------------------------------------
+                # BELOW → ZONE
+                # --------------------------------------------
 
-                    car_count += 1
+                elif (
+                    last_region == "BELOW"
 
-                    car["counted"] = True
+                    and
 
-                    print(
-                        "车辆 ID:",
-                        best_id,
-                        "通过计数线",
-                        "当前数量:",
-                        car_count
-                    )
+                    current_region == "ZONE"
+                ):
 
-
-                elif simple_down or simple_up:
-
-                    car_count += 1
-
-                    car["counted"] = True
-
-                    print(
-                        "车辆 ID:",
-                        best_id,
-                        "通过计数线",
-                        "当前数量:",
-                        car_count
-                    )
+                    car[
+                        "entry_region"
+                    ] = "BELOW"
 
 
-            # ==================================================
-            # 更新车辆位置
-            # ==================================================
+                # ============================================
+                # 27. ABOVE → ZONE → BELOW
+                #
+                # DOWN
+                # ============================================
 
-            car["previous"] = previous
+                elif (
+                    last_region == "ZONE"
 
-            car["center"] = center
+                    and
 
-            car["bbox"] = detection["bbox"]
+                    current_region == "BELOW"
+                ):
 
-            car["missing"] = 0
+
+                    if (
+                        car[
+                            "entry_region"
+                        ] == "ABOVE"
+
+                        and
+
+                        not car[
+                            "counted"
+                        ]
+                    ):
 
 
-            used_ids.add(best_id)
+                        vehicle_count += 1
+
+                        down_count += 1
+
+                        car[
+                            "counted"
+                        ] = True
+
+
+                        print(
+
+                            "Vehicle ID:",
+
+                            best_id,
+
+                            "crossed DOWN",
+
+                            "Total:",
+
+                            vehicle_count
+                        )
+
+
+                # ============================================
+                # 28. BELOW → ZONE → ABOVE
+                #
+                # UP
+                # ============================================
+
+                elif (
+                    last_region == "ZONE"
+
+                    and
+
+                    current_region == "ABOVE"
+                ):
+
+
+                    if (
+                        car[
+                            "entry_region"
+                        ] == "BELOW"
+
+                        and
+
+                        not car[
+                            "counted"
+                        ]
+                    ):
+
+
+                        vehicle_count += 1
+
+                        up_count += 1
+
+                        car[
+                            "counted"
+                        ] = True
+
+
+                        print(
+
+                            "Vehicle ID:",
+
+                            best_id,
+
+                            "crossed UP",
+
+                            "Total:",
+
+                            vehicle_count
+                        )
+
+
+                # ============================================
+                # 29. 快速移动兜底
+                #
+                # ABOVE → BELOW
+                # ============================================
+
+                elif (
+                    last_region == "ABOVE"
+
+                    and
+
+                    current_region == "BELOW"
+                ):
+
+
+                    if not car[
+                        "counted"
+                    ]:
+
+
+                        vehicle_count += 1
+
+                        down_count += 1
+
+                        car[
+                            "counted"
+                        ] = True
+
+
+                        print(
+
+                            "Vehicle ID:",
+
+                            best_id,
+
+                            "jumped DOWN",
+
+                            "Total:",
+
+                            vehicle_count
+                        )
+
+
+                # ============================================
+                # BELOW → ABOVE
+                # ============================================
+
+                elif (
+                    last_region == "BELOW"
+
+                    and
+
+                    current_region == "ABOVE"
+                ):
+
+
+                    if not car[
+                        "counted"
+                    ]:
+
+
+                        vehicle_count += 1
+
+                        up_count += 1
+
+                        car[
+                            "counted"
+                        ] = True
+
+
+                        print(
+
+                            "Vehicle ID:",
+
+                            best_id,
+
+                            "jumped UP",
+
+                            "Total:",
+
+                            vehicle_count
+                        )
+
+
+                # --------------------------------------------
+                # 更新区域状态
+                # --------------------------------------------
+
+                car[
+                    "last_region"
+                ] = current_region
+
+
+            # =================================================
+            # 30. 更新 Track
+            # =================================================
+
+            car[
+                "previous"
+            ] = previous
+
+
+            car[
+                "center"
+            ] = center
+
+
+            car[
+                "bbox"
+            ] = detection[
+                "bbox"
+            ]
+
+
+            car[
+                "missing"
+            ] = 0
+
+
+            used_ids.add(
+                best_id
+            )
 
 
         # ====================================================
-        # 没有找到对应车辆
-        # 创建新 ID
+        # 31. 新 Track
         # ====================================================
 
         else:
 
+
+            current_region = get_region(
+                center[1]
+            )
+
+
+            entry_region = None
+
+
+            if current_region in (
+                "ABOVE",
+                "BELOW"
+            ):
+
+                entry_region = (
+                    current_region
+                )
+
+
             cars[next_id] = {
 
-                "center": center,
+                "center":
+                    center,
 
-                "previous": center,
+                "previous":
+                    center,
 
-                "bbox": detection["bbox"],
+                "bbox":
+                    detection[
+                        "bbox"
+                    ],
 
-                "missing": 0,
+                "missing":
+                    0,
 
-                "counted": False,
+                "counted":
+                    False,
 
-                "direction": "UNKNOWN"
+                "direction":
+                    "UNKNOWN",
+
+                "last_region":
+                    current_region,
+
+                "entry_region":
+                    entry_region
             }
+
+
+            used_ids.add(
+                next_id
+            )
+
 
             next_id += 1
 
 
     # ========================================================
-    # 11. 删除消失太久的车辆
+    # 32. 删除长期丢失 Track
     # ========================================================
 
     delete_ids = []
@@ -504,49 +960,52 @@ while True:
 
     for car_id, car in cars.items():
 
-        if car["missing"] > MAX_MISSING:
 
-            delete_ids.append(car_id)
+        if (
+            car[
+                "missing"
+            ]
+            >
+            MAX_MISSING
+        ):
+
+            delete_ids.append(
+                car_id
+            )
 
 
     for car_id in delete_ids:
 
-        del cars[car_id]
+        del cars[
+            car_id
+        ]
 
 
     # ========================================================
-    # 12. 画计数线
-    # ========================================================
-
-    cv2.line(
-
-        frame,
-
-        (0, LINE_Y),
-
-        (frame.shape[1], LINE_Y),
-
-        (255, 255, 0),
-
-        3
-    )
-
-
-    # ========================================================
-    # 13. 画计数范围
+    # 33. 画 Counting Zone
     # ========================================================
 
     cv2.line(
 
         frame,
 
-        (0, LINE_Y - OFFSET),
+        (
+            0,
+            ZONE_TOP
+        ),
 
-        (frame.shape[1], LINE_Y - OFFSET),
+        (
+            frame.shape[1],
+            ZONE_TOP
+        ),
 
-        (0, 255, 255),
+        (
+            0,
+            255,
+            255
+        ),
 
-        1
+        2
     )
 
 
@@ -554,139 +1013,316 @@ while True:
 
         frame,
 
-        (0, LINE_Y + OFFSET),
+        (
+            0,
+            ZONE_BOTTOM
+        ),
 
-        (frame.shape[1], LINE_Y + OFFSET),
+        (
+            frame.shape[1],
+            ZONE_BOTTOM
+        ),
 
-        (0, 255, 255),
+        (
+            0,
+            255,
+            255
+        ),
 
-        1
+        2
     )
 
 
     # ========================================================
-    # 14. 绘制车辆
+    # 34. 画 Track
     # ========================================================
 
     for car_id, car in cars.items():
 
-        x, y, w, h = car["bbox"]
 
-        cx, cy = car["center"]
+        x, y, w, h = (
+            car[
+                "bbox"
+            ]
+        )
 
 
-        # 车辆框
+        cx, cy = (
+            car[
+                "center"
+            ]
+        )
+
+
+        # ----------------------------------------------------
+        # Bounding Box
+        # ----------------------------------------------------
 
         cv2.rectangle(
 
             frame,
 
-            (x, y),
+            (
+                x,
+                y
+            ),
 
-            (x + w, y + h),
+            (
+                x + w,
+                y + h
+            ),
 
-            (0, 0, 255),
+            (
+                0,
+                0,
+                255
+            ),
 
             2
         )
 
 
+        # ----------------------------------------------------
         # 中心点
+        # ----------------------------------------------------
 
         cv2.circle(
 
             frame,
 
-            (cx, cy),
+            (
+                cx,
+                cy
+            ),
 
             5,
 
-            (0, 255, 0),
+            (
+                0,
+                255,
+                0
+            ),
 
             -1
         )
 
 
-        # ID
+        # ----------------------------------------------------
+        # ID + Direction
+        # ----------------------------------------------------
+
+        label = (
+
+            f"ID:{car_id} "
+            f"{car['direction']}"
+        )
+
 
         cv2.putText(
 
             frame,
 
-            "ID:" + str(car_id),
+            label,
 
-            (x, y - 10),
+            (
+                x,
+                max(
+                    20,
+                    y - 10
+                )
+            ),
 
             cv2.FONT_HERSHEY_SIMPLEX,
 
             0.7,
 
-            (0, 255, 0),
-
-            2
-        )
-
-
-        # 方向
-
-        cv2.putText(
-
-            frame,
-
-            car["direction"],
-
-            (x, y + h + 20),
-
-            cv2.FONT_HERSHEY_SIMPLEX,
-
-            0.6,
-
-            (255, 255, 0),
+            (
+                0,
+                255,
+                0
+            ),
 
             2
         )
 
 
     # ========================================================
-    # 15. 显示 Car Count
+    # 35. 当前帧处理时间
+    # ========================================================
+
+    frame_end_time = time.perf_counter()
+
+
+    frame_processing_time = (
+
+        frame_end_time
+        -
+        frame_start_time
+    )
+
+
+    total_processing_time += (
+        frame_processing_time
+    )
+
+
+    # ========================================================
+    # 36. 实时 FPS
+    # ========================================================
+
+    if frame_processing_time > 0:
+
+        current_fps = (
+
+            1.0
+            /
+            frame_processing_time
+        )
+
+    else:
+
+        current_fps = 0.0
+
+
+    # ========================================================
+    # 37. 显示统计
     # ========================================================
 
     cv2.putText(
 
         frame,
 
-        "Car Count: " + str(car_count),
+        f"Total: {vehicle_count}",
 
-        (30, 70),
+        (
+            30,
+            50
+        ),
 
         cv2.FONT_HERSHEY_SIMPLEX,
 
-        2,
+        1.2,
 
-        (0, 0, 255),
+        (
+            0,
+            0,
+            255
+        ),
 
-        4
+        3
+    )
+
+
+    cv2.putText(
+
+        frame,
+
+        f"UP: {up_count}",
+
+        (
+            30,
+            95
+        ),
+
+        cv2.FONT_HERSHEY_SIMPLEX,
+
+        0.8,
+
+        (
+            255,
+            255,
+            0
+        ),
+
+        2
+    )
+
+
+    cv2.putText(
+
+        frame,
+
+        f"DOWN: {down_count}",
+
+        (
+            30,
+            130
+        ),
+
+        cv2.FONT_HERSHEY_SIMPLEX,
+
+        0.8,
+
+        (
+            255,
+            255,
+            0
+        ),
+
+        2
+    )
+
+
+    cv2.putText(
+
+        frame,
+
+        f"Processing FPS: {current_fps:.1f}",
+
+        (
+            30,
+            170
+        ),
+
+        cv2.FONT_HERSHEY_SIMPLEX,
+
+        0.7,
+
+        (
+            255,
+            255,
+            255
+        ),
+
+        2
     )
 
 
     # ========================================================
-    # 16. 显示视频
+    # 38. 保存结果视频
+    # ========================================================
+
+    if writer is not None:
+
+        writer.write(
+            frame
+        )
+
+
+    # ========================================================
+    # 39. 显示
     # ========================================================
 
     cv2.imshow(
 
-        "Vehicle Detection",
+        "MOG2 + Centroid Evaluation",
 
         frame
     )
 
 
+    # 如果你还想看 mask，
+    # 可以取消下面注释
 
-    # ========================================================
-    # 18. 播放速度
-    # ========================================================
+    # cv2.imshow(
+    #     "Foreground Mask",
+    #     mask
+    # )
 
-    key = cv2.waitKey(WAIT_TIME) & 0xFF
+
+    key = cv2.waitKey(
+        WAIT_TIME
+    ) & 0xFF
 
 
     if key == 27:
@@ -695,11 +1331,181 @@ while True:
 
 
 # ============================================================
-# 结束
+# 40. 释放资源
 # ============================================================
 
 cap.release()
 
+
+if writer is not None:
+
+    writer.release()
+
+
 cv2.destroyAllWindows()
 
-print("最终车辆数量:", car_count)
+
+# ============================================================
+# 41. 平均 Processing FPS
+# ============================================================
+
+average_processing_fps = 0.0
+
+
+if total_processing_time > 0:
+
+    average_processing_fps = (
+
+        total_frames
+        /
+        total_processing_time
+    )
+
+
+# ============================================================
+# 42. Count Error / Accuracy
+# ============================================================
+
+count_error = None
+
+count_accuracy = None
+
+
+if (
+    GROUND_TRUTH_COUNT is not None
+
+    and
+
+    GROUND_TRUTH_COUNT > 0
+):
+
+
+    count_error = abs(
+
+        vehicle_count
+
+        -
+
+        GROUND_TRUTH_COUNT
+    )
+
+
+    count_accuracy = max(
+
+        0.0,
+
+        1.0
+        -
+        (
+            count_error
+
+            /
+
+            GROUND_TRUTH_COUNT
+        )
+
+    ) * 100
+
+
+# ============================================================
+# 43. 最终实验结果
+# ============================================================
+
+print()
+
+print(
+    "========================================"
+)
+
+print(
+    "MOG2 + Centroid Evaluation"
+)
+
+print(
+    "========================================"
+)
+
+
+print(
+    "Frames Processed:",
+    total_frames
+)
+
+
+print(
+    "Average Processing FPS:",
+    round(
+        average_processing_fps,
+        2
+    )
+)
+
+
+print()
+
+
+print(
+    "Predicted Total:",
+    vehicle_count
+)
+
+
+print(
+    "UP:",
+    up_count
+)
+
+
+print(
+    "DOWN:",
+    down_count
+)
+
+
+# ============================================================
+# Ground Truth
+# ============================================================
+
+if GROUND_TRUTH_COUNT is not None:
+
+
+    print()
+
+
+    print(
+        "Ground Truth Count:",
+        GROUND_TRUTH_COUNT
+    )
+
+
+    print(
+        "Count Error:",
+        count_error
+    )
+
+
+    print(
+        "Counting Accuracy:",
+        f"{count_accuracy:.2f}%"
+    )
+
+
+# ============================================================
+# 输出视频
+# ============================================================
+
+if SAVE_OUTPUT_VIDEO:
+
+
+    print()
+
+
+    print(
+        "Result Video:",
+        OUTPUT_VIDEO_PATH
+    )
+
+
+print(
+    "========================================"
+)
