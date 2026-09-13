@@ -336,7 +336,3 @@ Vehicle Counting
 * 实时摄像头检测
 * ROS 2 视觉节点
 
-
-
-另外，**你现在最好加一张实际运行截图**到 `screenshots/result.png`，这个比 README 里写很多文字更有用。
-```
